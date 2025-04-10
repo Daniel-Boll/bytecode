@@ -1,0 +1,78 @@
+name: Build RPM Package
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build_rpm:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+
+    steps:
+      - name: Checkout code with full Git history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install system dependencies
+        run: |
+          dnf install -y python3 python3-pip python3-devel python3-build python3-wheel python3-setuptools rpm-build rpmdevtools git
+          pip3 install build "setuptools_scm[toml]>=3.4.3" wheel
+
+      - name: Set version from tag
+        id: set_version
+        run: echo "VERSION=$(echo "${{ github.ref_name }}" | sed 's/^v//')" >> $GITHUB_ENV
+
+      - name: Create Source Distribution
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ env.VERSION }}
+        run: python3 -m build --sdist --wheel
+
+      - name: Set up RPM build tree
+        run: rpmdev-setuptree
+
+      - name: Prepare RPM build environment
+        run: |
+          sed -i "s|%{version_placeholder}|${{ env.VERSION }}|g" rpm/bytecode.spec
+          cp dist/bytecode-*.{tar.gz,whl} ~/rpmbuild/SOURCES/
+          cp rpm/bytecode.spec ~/rpmbuild/SPECS/
+          ls -l ~/rpmbuild/SOURCES/
+
+      - name: Build RPM
+        run: rpmbuild -ba ~/rpmbuild/SPECS/bytecode.spec
+
+      - name: Copy RPMs to workspace
+        run: |
+          mkdir -p rpmbuild/{RPMS,SRPMS}
+          cp ~/rpmbuild/RPMS/noarch/*.rpm rpmbuild/RPMS/
+          cp ~/rpmbuild/SRPMS/*.rpm rpmbuild/SRPMS/
+          ls -l rpmbuild/RPMS/
+
+      - name: Test RPM Package
+        run: |
+          # Install the RPM
+          dnf install -y rpmbuild/RPMS/python3-bytecode-${{ env.VERSION }}-0.noarch.rpm
+
+          # Test 1: Verify installation and import
+          python3 -c "import bytecode; assert 'bytecode' in dir(), 'bytecode module not imported'; v = bytecode.__version__ if hasattr(bytecode, '__version__') else '${{ env.VERSION }}'; assert v == '${{ env.VERSION }}', f'Expected version ${{ env.VERSION }}, got {v}'"
+
+          # Test 2: Verify basic functionality (create Bytecode object)
+          python3 -c "from bytecode import Bytecode; code = Bytecode(); assert isinstance(code, Bytecode), 'Bytecode object creation failed'; assert len(code) == 0, 'New Bytecode object should be empty'"
+
+      - name: Create and Upload Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            rpmbuild/RPMS/python3-bytecode-${{ env.VERSION }}-0.noarch.rpm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
